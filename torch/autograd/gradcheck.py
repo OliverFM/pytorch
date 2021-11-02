@@ -1,4 +1,5 @@
 import torch
+from torch._C import InferredType
 from torch.types import _TensorOrTensors
 import torch.testing
 from torch.overrides import is_tensor_like
@@ -871,8 +872,60 @@ def _test_backward_mul_by_grad_output(outputs, inputs, check_sparse_nnz) -> bool
             raise GradcheckError('grad is incorrect size')
     return True
 
+def _test_undefined_forward_mode(func, outputs, inputs):
+    fwAD = torch.autograd.forward_ad
+    
+    all_v, all_u, all_u_dense = _make_vectors(inputs, outputs, use_forward_ad=True)
 
-def _test_undefined_grad(func, outputs, inputs) -> bool:
+    tensor_inputs = tuple(i for i in inputs if is_tensor_like(i) and i.requires_grad)
+    
+    with fwAD.dual_level():
+        fw_grads = []
+        dual_inputs = []
+        for i, inp in enumerate(inputs):
+            if is_tensor_like(inp) and inp.requires_grad:
+                if inp.layout == torch._mkldnn:  # type: ignore[attr-defined]
+                    raise ValueError("MKLDNN inputs are not support for forward AD gradcheck.")
+
+                inp = fwAD.make_dual(inp, torch.zeros_like(inp))
+                # If inp is a differentiable view, the dual might not be the tangent given to
+                # make_dual, so read it explicitly from the dual tensor
+                fw_grads.append(fwAD.unpack_dual(inp)[1])
+            dual_inputs.append(inp)
+        
+        for i, (fw_grad, u) in enumerate(zip(fw_grads, all_u)):
+            fw_grad.copy_(u.view_as(fw_grad))
+        
+        dual_inputs_idx = 0
+        for inp in inputs:
+            if is_tensor_like(inp) and inp.requires_grad:
+                dual_inp_obj = dual_inputs[dual_inputs_idx]
+                
+                # case 1 (Materialized Zero Tensor Tangent)
+                dual_inputs[dual_inputs_idx] = fwAD.make_dual(inp, torch.zeros_like(inp))
+                raw_outputs = _as_tuple(func(*dual_inputs))
+                dual_outputs1 = filter(_is_float_or_complex_tensor, raw_outputs)
+                
+                # case 2 (Efficient Zero Tensor Tangent since we don't make a dual object and pass a regular tensor)
+                dual_inputs[dual_inputs_idx] = inp
+                raw_outputs = _as_tuple(func(*dual_inputs))
+                dual_outputs2 = filter(_is_float_or_complex_tensor, raw_outputs)
+
+                # reset 
+                dual_inputs[dual_inputs_idx] = dual_inp_obj
+                dual_inputs_idx +=1
+
+                for index_o, (d_o1, d_o2) in enumerate(zip(dual_outputs1, dual_outputs2)):
+                    val1, res1 = fwAD.unpack_dual(d_o1)
+                    val2, res2 = fwAD.unpack_dual(d_o2)
+                    
+                    if res1 is None:
+                        assert res2 is None
+                    else:
+                        assert torch.equal(res1, res2)
+    return True
+
+def _test_undefined_backward_mode(func, outputs, inputs) -> bool:        
     diff_input_list: List[torch.Tensor] = list(_iter_tensors(inputs, True))
     if not diff_input_list:
         raise GradcheckError("no Tensors requiring grad found in input")
@@ -1205,6 +1258,13 @@ def _fast_gradcheck(func, func_out, inputs, outputs, eps, rtol,
                     atol, check_grad_dtypes, nondet_tol, *, use_forward_ad=False, complex_indices=None, test_imag=False):
     # See https://github.com/pytorch/pytorch/issues/53876 for details
     inp_tensors_idx, inp_tensors = _get_inp_tensors(inputs)
+    # Backward mode computes v^T * J (VJP)
+    # Since we computed J * u (JVP) through finite difference method, we perform an equality check
+    # between VJP * u, JVP * v 
+    # ----
+    # Forward mode computes J * u (JVP)
+    # Since we already compute JVP through finite difference method, 
+    # we don't need v for correctness check here as asserted below
     all_v, all_u, all_u_dense = _make_vectors(inp_tensors, outputs, use_forward_ad=use_forward_ad)
 
     numerical_vJu = _get_numerical_vJu(func, inputs, inp_tensors_idx, func_out, all_u, all_v, eps, is_forward_ad=use_forward_ad)
@@ -1212,6 +1272,7 @@ def _fast_gradcheck(func, func_out, inputs, outputs, eps, rtol,
         assert all_v is None
         analytical_vJu = _get_analytical_jacobian_forward_ad(func, inputs, _as_tuple(func_out),
                                                              all_u=all_u, check_grad_dtypes=check_grad_dtypes)
+        
     else:
         if not outputs:
             _check_no_differentiable_outputs_fast(func, func_out, inputs, inp_tensors_idx, all_u, eps, nondet_tol)
@@ -1347,6 +1408,12 @@ def _gradcheck_helper(func, inputs, eps, atol, rtol, check_sparse_nnz, nondet_to
     if check_batched_forward_grad:
         _test_batched_grad_forward_ad(func, tupled_inputs)
 
+    if check_undefined_grad:
+        if check_forward_ad:
+            _test_undefined_forward_mode(func, outputs, tupled_inputs)
+        else:
+            _test_undefined_backward_mode(func, outputs, tupled_inputs)
+
     # Short circuit because remaining tests rely on backward AD to be implemented
     if not check_backward_ad:
         return True
@@ -1356,9 +1423,6 @@ def _gradcheck_helper(func, inputs, eps, atol, rtol, check_sparse_nnz, nondet_to
             _test_batched_grad(tupled_inputs, o, i)
 
     _test_backward_mul_by_grad_output(outputs, tupled_inputs, check_sparse_nnz)
-
-    if check_undefined_grad:
-        _test_undefined_grad(func, outputs, tupled_inputs)
     return True
 
 
