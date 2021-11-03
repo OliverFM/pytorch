@@ -35,9 +35,8 @@ const lazy_tensors::Shape& GetParameterShape(
   // shape handling.
   const ir::ops::DeviceData* device_data =
       ir::ops::DeviceData::Cast(operand.node);
-  return device_data != nullptr ? input_shape
-                                : lazy_tensors::ShapeUtil::GetTupleElementShape(
-                                      input_shape, operand.index);
+  DCHECK(device_data);
+  return input_shape;
 }
 
 torch::lazy::hash_t ComputeNodeKey(
