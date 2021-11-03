@@ -335,9 +335,9 @@ class TSNodeLowering : public torch_lazy_tensors::compiler::TSNodeLoweringInterf
     const torch::lazy::Output& input = repeat->operand(0);
     const lazy_tensors::Shape& input_shape = ir::GetShapeFromTsOutput(input);
     const auto& repeats = repeat->repeats();
-    CHECK_GE(repeats.size(), input_shape.rank());
+    CHECK_GE(repeats.size(), input_shape.dim());
 
-    int64_t num_new_dimensions = repeats.size() - input_shape.rank();
+    int64_t num_new_dimensions = repeats.size() - input_shape.dim();
     std::vector<int64_t> padded_size(num_new_dimensions, 1);
     padded_size.insert(padded_size.end(), input_shape.sizes().begin(),
                        input_shape.sizes().end());
@@ -594,7 +594,7 @@ class TSNodeLowering : public torch_lazy_tensors::compiler::TSNodeLoweringInterf
     const auto& sizes = node->sizes();
     const lazy_tensors::Shape& input_shape = ir::GetShapeFromTsOutput(input);
     CHECK_EQ(sizes.size(), base_indices.size());
-    CHECK_EQ(input_shape.rank(), base_indices.size());
+    CHECK_EQ(input_shape.dim(), base_indices.size());
     for (size_t dim = 0; dim < base_indices.size(); ++dim) {
       int64_t start = base_indices[dim];
       base = GenerateSlice(/*base=*/base, /*dim=*/dim, /*start=*/start,
@@ -682,7 +682,7 @@ class TSNodeLowering : public torch_lazy_tensors::compiler::TSNodeLoweringInterf
     const auto& base_indices = node->base_indices();
     const torch::lazy::Output& source_argument = node->operand(1);
     const lazy_tensors::Shape& source_shape = ir::GetShapeFromTsOutput(source_argument);
-    CHECK_EQ(source_shape.rank(), base_indices.size());
+    CHECK_EQ(source_shape.dim(), base_indices.size());
     torch::jit::Value* base = dest;
     for (size_t dim = 0; dim < base_indices.size(); ++dim) {
       int64_t start = base_indices[dim];
